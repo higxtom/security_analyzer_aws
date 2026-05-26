@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     # DynamoDB
     dynamodb_table_name: str = Field(default="security-hub-agent-history")
 
+    # Bedrock タイムアウト (秒)
+    bedrock_connect_timeout: int = Field(default=120)
+    bedrock_read_timeout: int = Field(default=600)
+
     # Agent behavior
     dry_run: bool = Field(default=True)
     findings_severity_list: list[str] = Field(default=["CRITICAL", "HIGH"])
