@@ -1,0 +1,64 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: S3 bucket for Security Hub Agent reports (lifecycle 90d, AES256, versioning)
+
+Parameters:
+  BucketNameSuffix:
+    Type: String
+    Description: >
+      バケット名のサフィックス（例: <AccountId>-<Region>）。
+      最終バケット名: security-hub-agent-reports-<BucketNameSuffix>
+
+Resources:
+  ReportsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'security-hub-agent-reports-${BucketNameSuffix}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteReportsAfter90Days
+            Status: Enabled
+            ExpirationInDays: 90
+          - Id: DeleteNoncurrentVersionsAfter30Days
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+
+  ReportsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ReportsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyNonTLSAccess
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt ReportsBucket.Arn
+              - !Sub '${ReportsBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+Outputs:
+  BucketName:
+    Description: S3 バケット名
+    Value: !Ref ReportsBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-BucketName'
+  BucketArn:
+    Description: S3 バケット ARN
+    Value: !GetAtt ReportsBucket.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-BucketArn'

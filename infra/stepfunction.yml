@@ -1,0 +1,115 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Step Functions state machine for Security Hub Agent with error notification
+
+Parameters:
+  LambdaFunctionArn:
+    Type: String
+    Description: Security Hub Agent Lambda 関数の ARN
+  AlertTopicArn:
+    Type: String
+    Description: エラー通知先の SNS トピック ARN
+
+Resources:
+  StateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: security-hub-agent-sfn-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StateMachinePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Ref LambdaFunctionArn
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref AlertTopicArn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: '*'
+
+  StateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: security-hub-agent
+      RoleArn: !GetAtt StateMachineRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Security Hub Agent daily workflow",
+          "StartAt": "RunSecurityAnalysis",
+          "States": {
+            "RunSecurityAnalysis": {
+              "Type": "Task",
+              "Resource": "${LambdaFunctionArn}",
+              "TimeoutSeconds": 1800,
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "NotifyFailure",
+                  "ResultPath": "$.error"
+                }
+              ],
+              "Next": "CheckResult"
+            },
+            "CheckResult": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.statusCode",
+                  "NumericEquals": 500,
+                  "Next": "NotifyFailure"
+                }
+              ],
+              "Default": "Success"
+            },
+            "NotifyFailure": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${AlertTopicArn}",
+                "Subject": "[Security Hub Agent] Execution FAILED",
+                "Message.$": "States.Format('Security Hub Agent が失敗しました。\\n実行日: {}\\nエラー: {}', $$.Execution.StartTime, States.JsonToString($.error))"
+              },
+              "End": true
+            },
+            "Success": {
+              "Type": "Succeed"
+            }
+          }
+        }
+
+Outputs:
+  StateMachineArn:
+    Description: Step Functions ステートマシン ARN
+    Value: !Ref StateMachine
+    Export:
+      Name: !Sub '${AWS::StackName}-StateMachineArn'
+  StateMachineName:
+    Description: Step Functions ステートマシン名
+    Value: !GetAtt StateMachine.Name
+    Export:
+      Name: !Sub '${AWS::StackName}-StateMachineName'

@@ -1,0 +1,38 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: DynamoDB table for Security Hub Agent execution history (TTL 90d, PITR enabled)
+
+Resources:
+  HistoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: security-hub-agent-history
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: run_date
+          AttributeType: S
+        - AttributeName: executed_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: run_date
+          KeyType: HASH
+        - AttributeName: executed_at
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+Outputs:
+  TableName:
+    Description: DynamoDB テーブル名
+    Value: !Ref HistoryTable
+    Export:
+      Name: !Sub '${AWS::StackName}-TableName'
+  TableArn:
+    Description: DynamoDB テーブル ARN
+    Value: !GetAtt HistoryTable.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-TableArn'

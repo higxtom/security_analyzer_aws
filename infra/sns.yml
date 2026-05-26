@@ -1,0 +1,29 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: SNS topic for Security Hub Agent alerts with email subscription
+
+Parameters:
+  EmailSubscription:
+    Type: String
+    Description: セキュリティアラートを受信するメールアドレス
+
+Resources:
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: security-hub-agent
+      KmsMasterKeyId: alias/aws/sns
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref EmailSubscription
+
+Outputs:
+  TopicArn:
+    Description: SNS トピック ARN
+    Value: !Ref AlertTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-TopicArn'
+  TopicName:
+    Description: SNS トピック名
+    Value: !GetAtt AlertTopic.TopicName
+    Export:
+      Name: !Sub '${AWS::StackName}-TopicName'

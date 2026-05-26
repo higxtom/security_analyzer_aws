@@ -1,0 +1,54 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: EventBridge Scheduler for Security Hub Agent (daily at 08:00 JST)
+
+Parameters:
+  StateMachineArn:
+    Type: String
+    Description: 起動対象の Step Functions ステートマシン ARN
+
+Resources:
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: security-hub-agent-scheduler-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StartStateMachinePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource: !Ref StateMachineArn
+
+  DailySchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: security-hub-agent-daily
+      Description: Run Security Hub Agent daily at 08:00 JST
+      # cron(分 時 日 月 曜日 年) — Asia/Tokyo タイムゾーン指定のため 08:00 JST をそのまま記述
+      ScheduleExpression: 'cron(0 8 * * ? *)'
+      ScheduleExpressionTimezone: Asia/Tokyo
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      State: ENABLED
+      Target:
+        Arn: !Ref StateMachineArn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"action": "run_analysis"}'
+        RetryPolicy:
+          MaximumRetryAttempts: 1
+          MaximumEventAgeInSeconds: 3600
+
+Outputs:
+  ScheduleName:
+    Description: EventBridge Scheduler スケジュール名
+    Value: !Ref DailySchedule
+    Export:
+      Name: !Sub '${AWS::StackName}-ScheduleName'
