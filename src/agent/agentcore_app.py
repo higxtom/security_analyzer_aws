@@ -4,6 +4,8 @@ Amazon Bedrock AgentCore エントリーポイント
 Strands A2AServer を使って HTTP サーバーとして起動する。
 AgentCore はこのコンテナを起動し、A2A プロトコル経由でエージェントを呼び出す。
 
+AWS リソースへのアクセスは AWS API MCP Server 経由で行う。
+
 起動方法:
     python -m src.agent.agentcore_app
 
@@ -13,6 +15,7 @@ A2A メッセージの例 (AgentCore / Step Functions から呼び出す場合):
     }
 または run_security_analysis() を直接起動する場合は lambda_handler.py を参照。
 """
+import atexit
 import os
 
 # boto3 グローバルタイムアウト設定を適用
@@ -21,6 +24,7 @@ from strands.multiagent.a2a.server import A2AServer
 
 from src.agent.security_agent import create_agent
 from src.utils.logger import get_logger
+from src.utils.mcp_client import create_aws_mcp_client
 
 logger = get_logger(__name__)
 
@@ -31,8 +35,15 @@ _HTTP_URL = os.getenv("AGENTCORE_HTTP_URL", None)
 
 
 def build_server() -> A2AServer:
-    """A2AServer インスタンスを生成して返す（テストでの差し替えを可能にする）。"""
-    agent = create_agent()
+    """A2AServer インスタンスを生成して返す（テストでの差し替えを可能にする）。
+
+    AWS API MCP Server をバックグラウンドで起動し、Agent に MCP ツールを提供する。
+    """
+    mcp_client = create_aws_mcp_client()
+    mcp_client.start()
+    atexit.register(mcp_client.stop)
+
+    agent = create_agent(tools=[mcp_client])
     return A2AServer(
         agent=agent,
         host=_HOST,
