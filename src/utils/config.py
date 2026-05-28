@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     bedrock_connect_timeout: int = Field(default=120)
     bedrock_read_timeout: int = Field(default=600)
 
+    # MCP Server
+    mcp_startup_timeout: int = Field(default=60)
+
     # Agent behavior
     dry_run: bool = Field(default=True)
     findings_severity_list: list[str] = Field(default=["CRITICAL", "HIGH"])
