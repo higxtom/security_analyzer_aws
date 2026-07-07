@@ -1,0 +1,4 @@
+# Lambda 用の依存パッケージ（薄いトリガー役のみ。実処理は AgentCore Runtime 側で行う）
+# boto3 は純 Python のため manylinux 指定なしでそのまま zip 化できる。
+# bedrock-agentcore サービスクライアントを含む比較的新しいバージョンが必要。
+boto3>=1.40.0

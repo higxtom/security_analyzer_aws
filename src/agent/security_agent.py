@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from botocore.config import Config as BotocoreConfig
-from strands import Agent
+from strands import Agent, tool
 from strands.models.bedrock import BedrockModel
 
 # boto3 グローバルタイムアウト設定を適用
@@ -132,6 +132,58 @@ def create_agent(
             "S3 に保存し SNS で通知する AWS セキュリティ専門エージェント。"
         ),
         tools=tools,
+    )
+
+
+# ---------------------------------------------------------------------------
+# AgentCore Runtime エントリーポイント用ディスパッチャー
+# A2A 経由で {"run_date": ..., "action": "run_analysis"} を受け取り、
+# run_security_analysis() をそのまま呼び出す単一ツール専用の Agent。
+# ---------------------------------------------------------------------------
+
+DISPATCH_SYSTEM_PROMPT = """
+あなたは Security Hub Agent のディスパッチャーです。会話や説明は行いません。
+
+受け取るメッセージは次の JSON 形式です:
+{"run_date": "YYYY-MM-DD", "action": "run_analysis"}
+
+## 実行手順
+1. メッセージから run_date を取り出し、run_daily_security_analysis ツールを
+   run_date を引数にして 1 回だけ呼び出す。
+2. ツールが返した JSON をそのまま出力する。要約・説明・Markdown 装飾・
+   コードフェンスなど、JSON 以外の文字は一切付け加えない。
+"""
+
+
+@tool
+def run_daily_security_analysis(run_date: str) -> dict[str, Any]:
+    """Security Hub Agent の日次ワークフローを実行する（AgentCore Runtime 用）。
+
+    Args:
+        run_date: 対象日 (YYYY-MM-DD)。
+
+    Returns:
+        run_security_analysis() の実行結果。
+    """
+    return run_security_analysis(run_date=run_date)
+
+
+def create_dispatcher_agent() -> Agent:
+    """AgentCore Runtime のエントリーポイント (agentcore_app.py) が使う、
+    run_daily_security_analysis ツールのみを持つ専用 Agent を生成する。
+
+    汎用ツール一式を持つ create_agent() とは異なり、この Agent は
+    「run_date を受け取ってワークフローを起動する」以外の判断をしない。
+    """
+    return Agent(
+        model=_create_bedrock_model(),
+        system_prompt=DISPATCH_SYSTEM_PROMPT,
+        name="security-hub-agent-dispatcher",
+        description=(
+            "Security Hub Agent の日次ワークフローを起動するディスパッチャー。"
+            "run_date を受け取り run_daily_security_analysis ツールを呼び出す。"
+        ),
+        tools=[run_daily_security_analysis],
     )
 
 
@@ -276,94 +328,73 @@ def _step_save_and_notify(
 ) -> dict[str, Any]:
     """Step 4: S3 保存 → SNS 通知 → 履歴保存。
 
-    ツール呼び出し中心のため推論負荷が小さい。
+    呼び出し順序・引数が完全に決定的なため、Bedrock 推論を挟まずツール関数を
+    直接呼び出す。LLM 経由にすると大きなレポート本文を1回のプロンプトに
+    埋め込むことになり、Bedrock の read_timeout（デフォルト 600 秒）を
+    超えて失敗することがあったため。
     """
-    agent = create_agent(
-        tools=[
-            save_multiple_files_to_s3,
-            publish_security_report,
-            save_execution_history,
-        ],
-        system_prompt=(
-            "あなたは AWS セキュリティレポート配信アシスタントです。"
-            "指示に従ってツールを呼び出し、結果を報告してください。"
-        ),
-    )
-
     severity_summary = findings_result.get("severity_summary", {})
     total = findings_result.get("total", 0)
     top_findings = findings_result.get("findings", [])[:5]
 
-    prompt = f"""
-以下の 3 つのタスクを順に実行してください。
+    s3_files = save_multiple_files_to_s3(
+        files=[
+            {"filename": "report.md", "content": report_md, "content_type": "text/markdown"},
+            {"filename": "remediation.yaml", "content": remediation_yaml, "content_type": "application/x-yaml"},
+            {"filename": "commands.sh", "content": commands_sh, "content_type": "text/x-shellscript"},
+        ],
+        run_date=run_date,
+    )
 
-## タスク 1: S3 保存
-save_multiple_files_to_s3 を呼び出し、以下の 3 ファイルを保存してください。
-run_date: "{run_date}"
+    sns_result = publish_security_report(
+        severity_summary=severity_summary,
+        top_findings=top_findings,
+        s3_files=s3_files,
+        run_date=run_date,
+    )
 
-ファイル一覧:
-1. filename="report.md", content_type="text/markdown"
-   content:
-{json.dumps(report_md, ensure_ascii=False)}
+    report_s3_key = next(
+        (f["s3_key"] for f in s3_files if f.get("filename") == "report.md"), ""
+    )
 
-2. filename="remediation.yaml", content_type="application/x-yaml"
-   content:
-{json.dumps(remediation_yaml, ensure_ascii=False)}
+    history_item = save_execution_history(
+        run_date=run_date,
+        severity_summary=severity_summary,
+        total_findings=total,
+        s3_report_key=report_s3_key,
+        sns_message_id=sns_result.get("message_id", ""),
+        status="SUCCESS",
+    )
 
-3. filename="commands.sh", content_type="text/x-shellscript"
-   content:
-{json.dumps(commands_sh, ensure_ascii=False)}
-
-## タスク 2: SNS 通知
-save_multiple_files_to_s3 の戻り値 (s3_files) を使い、publish_security_report を呼び出してください。
-- severity_summary: {json.dumps(severity_summary, ensure_ascii=False)}
-- top_findings: {json.dumps(top_findings, ensure_ascii=False)}
-- run_date: "{run_date}"
-
-## タスク 3: 履歴保存
-save_execution_history を呼び出してください。
-- run_date: "{run_date}"
-- severity_summary: {json.dumps(severity_summary, ensure_ascii=False)}
-- total_findings: {total}
-- s3_report_key: (save_multiple_files_to_s3 の結果から report.md の s3_key)
-- sns_message_id: (publish_security_report の結果から message_id)
-- status: "SUCCESS"
-"""
-    result = agent(prompt)
     logger.info("Step 4 (save & notify) completed.")
-    return {"step": "save_and_notify", "result": str(result)}
+    return {
+        "step": "save_and_notify",
+        "s3_files": s3_files,
+        "sns_result": sns_result,
+        "history_item": history_item,
+    }
 
 
 def _step_no_findings_notify(run_date: str) -> dict[str, Any]:
-    """検出結果が 0 件の場合に SNS 通知 + 履歴保存を行う。"""
-    agent = create_agent(
-        tools=[publish_security_report, save_execution_history],
-        system_prompt=(
-            "あなたは AWS セキュリティレポート配信アシスタントです。"
-            "指示に従ってツールを呼び出し、結果を報告してください。"
-        ),
+    """検出結果が 0 件の場合に SNS 通知 + 履歴保存を行う（決定的処理のため直接呼び出し）。"""
+    sns_result = publish_security_report(
+        severity_summary={},
+        top_findings=[],
+        s3_files=[],
+        run_date=run_date,
     )
 
-    prompt = f"""
-Security Hub の検出結果が 0 件でした。以下を実行してください。
+    history_item = save_execution_history(
+        run_date=run_date,
+        severity_summary={},
+        total_findings=0,
+        s3_report_key="",
+        sns_message_id=sns_result.get("message_id", ""),
+        status="NO_FINDINGS",
+    )
 
-1. publish_security_report を呼び出す:
-   - severity_summary: {{}}
-   - top_findings: []
-   - s3_files: []
-   - run_date: "{run_date}"
-
-2. save_execution_history を呼び出す:
-   - run_date: "{run_date}"
-   - severity_summary: {{}}
-   - total_findings: 0
-   - s3_report_key: ""
-   - sns_message_id: (上記の結果から取得)
-   - status: "NO_FINDINGS"
-"""
-    result = agent(prompt)
     logger.info("No findings notification completed.")
-    return {"step": "no_findings", "result": str(result)}
+    return {"step": "no_findings", "sns_result": sns_result, "history_item": history_item}
 
 
 # ---------------------------------------------------------------------------
